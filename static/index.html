@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>OratorIQ Live</title>
+    <script src="/static/js/timeline.js"></script>
+    <style>
+        body { font-family: sans-serif; background: #121214; color: white; padding: 20px; }
+        .container { display: flex; gap: 20px; }
+        video { border: 2px solid #333; border-radius: 8px; }
+        .status { margin-top: 10px; padding: 10px; background: #222; border-radius: 4px; }
+        button { padding: 10px 20px; cursor: pointer; background: #646cff; color: white; border: none; border-radius: 4px; }
+        button:disabled { background: #444; }
+        .red { color: #ff4444; }
+        .green { color: #44ff44; }
+    </style>
+</head>
+<body>
+    <h1>OratorIQ Live Analysis</h1>
+    <div class="container">
+        <div>
+            <video id="webcam" width="640" height="480" autoplay muted></video>
+            <div class="status">
+                Status: <span id="face-status">Waiting...</span>
+            </div>
+            <div style="margin-top: 20px;">
+                <button id="startBtn" onclick="startSession()">Start Session</button>
+                <button id="stopBtn" onclick="stopSession()" disabled>Stop & Analyze</button>
+            </div>
+        </div>
+        <div style="flex: 1;">
+            <h3>Results</h3>
+            <div id="results" style="white-space: pre-wrap; background: #222; padding: 15px; border-radius: 8px;"></div>
+        </div>
+    </div>
+
+    <script>
+        let ws;
+        let mediaRecorder;
+        let audioChunks = [];
+        let videoInterval;
+        const timeline = new UnifiedTimeline();
+
+        async function initCamera() {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            document.getElementById('webcam').srcObject = stream;
+            return stream;
+        }
+
+        async function startSession() {
+            const stream = await initCamera();
+            
+            // 1. WebSocket for Video
+            ws = new WebSocket(`ws://${location.host}/ws/video`);
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                const el = document.getElementById('face-status');
+                if(data.face_detected) {
+                    el.innerText = `Face Detected ✅ (${data.dominant_emotion})`;
+                    el.className = "green";
+                    timeline.addExpression(Date.now(), data.dominant_emotion, 1.0, data.emotions, 1.0);
+                } else {
+                    el.innerText = "No Face ❌";
+                    el.className = "red";
+                }
+            };
+
+            // Send frames every 200ms
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            
+            videoInterval = setInterval(() => {
+                if(ws.readyState === WebSocket.OPEN) {
+                    const video = document.getElementById('webcam');
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                    ctx.drawImage(video, 0, 0);
+                    const base64 = canvas.toDataURL('image/jpeg', 0.5);
+                    ws.send(base64);
+                }
+            }, 200);
+
+            // 2. Audio Recording
+            mediaRecorder = new MediaRecorder(stream);
+            audioChunks = [];
+            mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+            mediaRecorder.start();
+
+            document.getElementById('startBtn').disabled = true;
+            document.getElementById('stopBtn').disabled = false;
+            document.getElementById('results').innerText = "Recording...";
+        }
+
+        async function stopSession() {
+            clearInterval(videoInterval);
+            if(ws) ws.close();
+            
+            mediaRecorder.stop();
+            mediaRecorder.onstop = async () => {
+                const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                const formData = new FormData();
+                formData.append("audio", audioBlob, "session.wav");
+
+                document.getElementById('results').innerText = "Analyzing... (This may take a moment)";
+                
+                const res = await fetch('/api/analyze', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await res.json();
+                
+                const sessionData = timeline.exportSession();
+                console.log("Session Data:", sessionData);
+                document.getElementById('results').innerText = JSON.stringify(data, null, 2) + "\\n\\nTimeline Events: " + sessionData.events.length;
+            };
+
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('stopBtn').disabled = true;
+        }
+    </script>
+</body>
+</html>
